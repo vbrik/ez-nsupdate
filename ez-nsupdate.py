@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
+"""Convenience wrapper for nsupdate(1)
+
+This script is intended to simplify common DNS manipulations by generating a list
+of nsupdate(1) commands and either executing or printing them.
+
+The main value-adds are (1) automatic creation of PTR records when an A record is
+created, and (2) some sanity checking.
+
+See --help output for details.
+"""
 import argparse
 import sys
-from pprint import pprint
 
 import ipaddress
 import re
 import socket
 import subprocess
-
 
 def is_valid_fqdn(hostname):
     if len(hostname) > 255:
@@ -26,38 +34,38 @@ def is_valid_ip(ip):
         return False
 
 
-def nsupdate_cmd_add_addr(fqdn, addr, ttl):
+def nsupdate_add_addr(fqdn, addr, ttl):
     rev_addr = '.'.join(reversed(addr.split('.'))) + '.in-addr.arpa.'
     return '\n'.join((
             f'prereq nxdomain {fqdn}',
             f'update add {fqdn} {ttl} A {addr}',
+            'send',
             f'prereq nxdomain {rev_addr}',
             f'update add {rev_addr} {ttl} PTR {fqdn}',
             'send'))
 
 
-def nsupdate_cmd_add_alias(fqdn, cname, ttl):
+def nsupdate_add_alias(fqdn, cname, ttl):
     return '\n'.join((
             f'prereq nxdomain {fqdn}',
             f'update add {fqdn} {ttl} CNAME {cname}',
             'send'))
 
 
-def nsupdate_cmd_add_round_robin(fqdn, addrs, ttl):
+def nsupdate_add_round_robin(fqdn, addrs, ttl):
     return '\n'.join((
             f'prereq nxdomain {fqdn}',
-            '\n'.join(f'update add {fqdn} {ttl} A {a}' for a in addrs),
-            'send'))
+            '\n'.join(f'update add {fqdn} {ttl} A {a}\nsend' for a in addrs)))
 
 
-def nsupdate_cmd_purge_fqdn(fqdn):
-    cmd = (f'update delete {fqdn}',)
+def nsupdate_purge_fqdn(fqdn):
+    cmd = (f'update delete {fqdn}', 'send')
     ips = get_ipv4_by_hostname(fqdn)
     if len(ips) == 1:
         addr = ips[0]
-        rev_addr = '.'.join(reversed(addr.split('.'))) + '.in-addr.arpa.'
-        cmd += (f'update delete {rev_addr}',)
-    return '\n'.join(cmd + ('send',))
+        rev_addr = '.'.join(reversed(addr.split('.')))
+        cmd += (f'update delete {rev_addr}.in-addr.arpa.', 'send')
+    return '\n'.join(cmd)
 
 
 def get_ipv4_by_hostname(hostname):
@@ -81,18 +89,17 @@ def main():
     parser.add_argument('action', choices=('add', 'purge'),
         help='action to execute')
     parser.add_argument('cmd', metavar='ARG', nargs='+', 
-        help='FQDN or IP address (see examples at the bottom)')
+        help='FQDN or IP address (see syntax at the bottom)')
     parser.add_argument('--key', metavar='PATH', required=True,
         help='TSIG key file for nsupdate')
     parser.add_argument('--server',
         help='DSN server address (default: use local-host mode)')
     parser.add_argument('--ttl', metavar='SECONDS', type=int, default=3600, 
         help='time to live (default: 3600)')
-    parser.add_argument('--dry-run', action='store_true', 
-        help='print out nsupdate commands and exit')
+    parser.add_argument('--noop', action='store_true', 
+        help='print out nsupdate command list and exit')
 
     args = parser.parse_args()
-    pprint(args)
 
     fqdn = args.cmd[0]
     vals = args.cmd[1:]
@@ -105,25 +112,31 @@ def main():
             parser.error('Failed to parse command: incomplete command.')
         elif len(vals) == 1:
             if is_valid_ip(vals[0]):
-                nsupdate_cmd = nsupdate_cmd_add_addr(fqdn, vals[0], args.ttl)
+                nsupdate_script = nsupdate_add_addr(fqdn, vals[0], args.ttl)
             elif is_valid_fqdn(vals[0]):
-                nsupdate_cmd = nsupdate_cmd_add_alias(fqdn, vals[0], args.ttl)
+                nsupdate_script = nsupdate_add_alias(fqdn, vals[0], args.ttl)
             else:
                 parser.error('Failed to parse command: second ARG not as expected.')
         elif len(vals) > 1:
             if all(is_valid_ip(v) for v in vals):
-                nsupdate_cmd = nsupdate_cmd_add_round_robin(fqdn, vals, args.ttl)
+                nsupdate_script = nsupdate_add_round_robin(fqdn, vals, args.ttl)
             else:
                 parser.error('Failed to parse command: expected valid IP addresses.')
     if args.action == 'purge':
         if len(args.cmd) != 1:
-            parser.error('Failed to parse command.')
-        nsupdate_cmd = nsupdate_cmd_purge_fqdn(fqdn)
+            parser.error('Failed to parse command: extraneous arguments')
+        nsupdate_script = nsupdate_purge_fqdn(fqdn)
 
-    if args.dry_run:
-        print(nsupdate_cmd)
+    nsupdate_cmd = ['nsupdate', '-k', args.key]
+    if args.server:
+        nsupdate_script = f'server {args.server}\n' + nsupdate_script
     else:
-        subprocess.run(['cat'], input=bytes(nsupdate_cmd, encoding='ascii'))
+        nsupdate_cmd.append('-l')
+    if args.noop:
+        print(nsupdate_cmd)
+        print(nsupdate_script)
+    else:
+        subprocess.run(nsupdate_cmd, input=bytes(nsupdate_script, encoding='ascii'))
         
 
 if __name__ == '__main__':
