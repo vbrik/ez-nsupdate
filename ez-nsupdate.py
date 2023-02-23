@@ -17,21 +17,23 @@ import re
 import socket
 import subprocess
 
-def is_valid_fqdn(hostname):
+def validate_fqdn(hostname):
+    orig_hostname = hostname
     if len(hostname) > 255:
-        return False
+        raise ValueError
     if hostname[-1] == '.':
         hostname = hostname[:-1]
     allowed = re.compile('(?!-)[A-Z\\d-]{1,63}(?<!-)$', re.IGNORECASE)
-    return all(allowed.match(x) for x in hostname.split('.'))
+    if all(allowed.match(x) for x in hostname.split('.')):
+        return orig_hostname
+    else:
+        raise ValueError
 
 
-def is_valid_ip(ip):
-    try:
-        ipaddress.ip_address(ip)
-        return True
-    except ValueError:
-        return False
+def validate_ip(ip):
+    ipaddress.ip_address(ip)
+    # if ip is invalid ValueError will be raised, which is what we want for argparse
+    return ip
 
 
 def nsupdate_add_addr(fqdn, addr, ttl):
@@ -79,53 +81,43 @@ def get_ipv4_by_hostname(hostname):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='A convenience wrapper around nsupdate(1).',
-        formatter_class=argparse.RawTextHelpFormatter,
-        epilog='Supported command syntax:\n'
-        '* Create A and PTR records:\t%(prog)s add FQDN IP\n'
-        '* Create CNAME record:\t\t%(prog)s add FQDN-1 FQDN-2\n'
-        '* Create round-robin A records:\t%(prog)s add FQDN IP-1 IP-2 ...\n'
-        '* Delete A, PTR, CNAME records:\t%(prog)s purge FQDN\n')
-    parser.add_argument('action', choices=('add', 'purge'),
-        help='action to execute')
-    parser.add_argument('cmd', metavar='ARG', nargs='+', 
-        help='FQDN or IP address (see syntax at the bottom)')
+        description='A convenience wrapper around nsupdate(1).')
+    parser.add_argument('--noop', action='store_true', 
+        help='print out nsupdate command list and exit')
     parser.add_argument('--key', metavar='PATH', required=True,
         help='TSIG key file for nsupdate')
-    parser.add_argument('--server',
+    parser.add_argument('--server', metavar='ADDRESS',
         help='DSN server address (default: use local-host mode)')
     parser.add_argument('--ttl', metavar='SECONDS', type=int, default=3600, 
         help='time to live (default: 3600)')
-    parser.add_argument('--noop', action='store_true', 
-        help='print out nsupdate command list and exit')
+    parser.add_argument('--name', metavar='FQDN', required=True, type=validate_fqdn,
+        help='host name to act on')
+
+    group = parser.add_argument_group('actions')
+    mxgroup = group.add_mutually_exclusive_group()
+    mxgroup.add_argument('--add-addr', metavar='IP',
+        help='create A and PTR records for FQDN')
+    mxgroup.add_argument('--add-rr', metavar='IP', nargs='+', type=validate_ip,
+        help='create A record round-robin for FQDN')
+    mxgroup.add_argument('--add-alias', metavar='FQDN-2', type=validate_fqdn,
+        help='create CNAME mapping FQDN to FQDN-2')
+    mxgroup.add_argument('--purge', action='store_true',
+        help='delete A, PTR or CNAME records of FQDN')
 
     args = parser.parse_args()
+    print(args)
 
-    fqdn = args.cmd[0]
-    vals = args.cmd[1:]
-    if not is_valid_fqdn(fqdn):
-        parser.error(f'Failed to parse command: "{fqdn}" is not a valid FQDN.')
-    fqdn = (fqdn if fqdn.endswith('.') else fqdn + '.')
+    if not args.name.endswith('.'):
+        args.name += '.'
 
-    if args.action == 'add':
-        if len(vals) == 0:
-            parser.error('Failed to parse command: incomplete command.')
-        elif len(vals) == 1:
-            if is_valid_ip(vals[0]):
-                nsupdate_script = nsupdate_add_addr(fqdn, vals[0], args.ttl)
-            elif is_valid_fqdn(vals[0]):
-                nsupdate_script = nsupdate_add_alias(fqdn, vals[0], args.ttl)
-            else:
-                parser.error('Failed to parse command: second ARG not as expected.')
-        elif len(vals) > 1:
-            if all(is_valid_ip(v) for v in vals):
-                nsupdate_script = nsupdate_add_round_robin(fqdn, vals, args.ttl)
-            else:
-                parser.error('Failed to parse command: expected valid IP addresses.')
-    if args.action == 'purge':
-        if len(args.cmd) != 1:
-            parser.error('Failed to parse command: extraneous arguments')
-        nsupdate_script = nsupdate_purge_fqdn(fqdn)
+    if args.add_addr:
+        nsupdate_script = nsupdate_add_addr(args.name, args.add_addr, args.ttl)
+    elif args.add_alias:
+        nsupdate_script = nsupdate_add_alias(args.name, args.add_alias, args.ttl)
+    elif args.add_rr:
+        nsupdate_script = nsupdate_add_round_robin(args.name, args.add_rr, args.ttl)
+    elif args.purge:
+        nsupdate_script = nsupdate_purge_fqdn(args.name)
 
     nsupdate_cmd = ['nsupdate', '-k', args.key]
     if args.server:
@@ -137,7 +129,7 @@ def main():
         print(nsupdate_script)
     else:
         subprocess.run(nsupdate_cmd, input=bytes(nsupdate_script, encoding='ascii'))
-        
+       
 
 if __name__ == '__main__':
     sys.exit(main())
