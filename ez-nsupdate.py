@@ -1,57 +1,38 @@
 #!/usr/bin/env python3
 """Convenience wrapper for nsupdate(1)
 
-This script is intended to simplify common DNS manipulations by generating a list
-of nsupdate(1) commands and either executing or printing them.
+This script is intended to simplify common DNS manipulations by generating a
+list of nsupdate(1) commands and either executing or just printing them out.
 
-The main value-adds are (1) automatic creation of PTR records when an A record is
-created, and (2) some sanity checking.
+The main value-adds are (1) automatic creation and cleanup of PTR records
+together with A records, and (2) fewer typos.
 
 See --help output for details.
 """
 import argparse
-import sys
-
-import ipaddress
-import re
-import socket
 import subprocess
+import sys
 
 
 def nsupdate_add_addr(fqdn, addr, ttl):
     """
-    Generate list of nsupdate scripts that create A and PTR resource records.
-
-    The generated scripts will not overwrite existing resource records.
-
-    Args:
-        fqdn (str): name of the A resource record
-        addr (str): IP address to map hostname to
-        ttl (int): time to live
-    Returns:
-        list: list nsupdate scripts
+    Generate a list of two nsupdate scripts that create A and PTR resource
+    records if no record with the same name of any type exists.
     """
     rev_addr = '.'.join(reversed(addr.split('.')))
-    return ['\n'.join([f'prereq nxdomain {fqdn}',
+    add_a = '\n'.join([f'prereq nxdomain {fqdn}',
                         f'update add {fqdn} {ttl} A {addr}',
-                        'send']),
-            '\n'.join([f'prereq nxdomain {rev_addr}.in-addr.arpa.',
+                        'send'])
+    add_ptr = '\n'.join([f'prereq nxdomain {rev_addr}.in-addr.arpa.',
                         f'update add {rev_addr}.in-addr.arpa. {ttl} PTR {fqdn}',
-                        'send'])]
+                        'send'])
+    return [add_a, add_ptr]
 
 
 def nsupdate_add_alias(fqdn, cname, ttl):
     """
-    Generate nsupdate script that creates CNAME resource records.
-
-    The generated script will not overwrite existing resource records.
-
-    Args:
-        fqdn (str): name of the resource record
-        cname (str): cname value
-        ttl (int): time to live
-    Returns:
-        list: nsupdate script as a string inside a list
+    Generate nsupdate script that creates a CNAME resource record if no record
+    with the same name of any type exists.
     """
     return ['\n'.join((
             f'prereq nxdomain {fqdn}',
@@ -61,16 +42,8 @@ def nsupdate_add_alias(fqdn, cname, ttl):
 
 def nsupdate_add_round_robin(fqdn, addrs, ttl):
     """
-    Generate nsupdate script that creates A record round-robin.
-
-    The generated script will not overwrite existing resource records.
-
-    Args:
-        fqdn (str): name of the resource record
-        addrs (list): list of IP addresses
-        ttl (int): time to live
-    Returns:
-        list: list of nsupdate scripts
+    Generate a list of nsupdate scripts that create A record round-robin if
+    no record with the same name of any time exists.
     """
     cmds = [f'update add {fqdn} {ttl} A {a}' + '\n' + 'send' for a in addrs]
     cmds[0] = f'prereq nxdomain {fqdn}' + '\n' + cmds[0]
@@ -80,13 +53,6 @@ def nsupdate_add_round_robin(fqdn, addrs, ttl):
 def nsupdate_purge_fqdn(fqdn):
     """
     Generate nsupdate script that deletes A, PTR, or CNAME records of fqdn.
-
-    Args:
-        fqdn (str): name of the resource record
-        addrs (list): list of IP addresses
-        ttl (int): time to live
-    Returns:
-        list: list of nsupdate scripts
     """
     cmd = [f'update delete {fqdn}' + '\n' + 'send']
     ips = get_ipv4_by_hostname(fqdn)
@@ -101,13 +67,9 @@ def nsupdate_purge_fqdn(fqdn):
 
 def get_ipv4_by_hostname(hostname):
     """
-    Resolve hostname.
-
-    Args:
-        hostname (str): hostname to resolve
-    Returns:
-        list: list of IP addresses
+    Resolve ip address(es) of hostname.
     """
+    import socket
     try:
         # https://docs.python.org/3/library/socket.html#socket.getaddrinfo
         return list(i[4][0] for i in socket.getaddrinfo(hostname, 0)
@@ -124,18 +86,18 @@ def validate_fqdn(hostname):
     Args:
         hostname (str): hostname to validate
     Returns:
-        str: hostname if it is valid
+        str: hostname if it is valid, possibly with trailing dot appended
     Raises:
         ValueError: if hostname is not valid
     """
-    orig_hostname = hostname
+    import re
     if len(hostname) > 255:
         raise ValueError
     if hostname[-1] == '.':
         hostname = hostname[:-1]
     allowed = re.compile('(?!-)[A-Z\\d-]{1,63}(?<!-)$', re.IGNORECASE)
     if all(allowed.match(x) for x in hostname.split('.')):
-        return orig_hostname
+        return hostname + '.'
     else:
         raise ValueError
 
@@ -151,24 +113,24 @@ def validate_ip(ip):
     Raises:
         ValueError: if IP is not valid
     """
-    ipaddress.ip_address(ip)
+    import ipaddress
     # if ip is invalid ValueError will be raised, which is what we want for argparse
+    ipaddress.ip_address(ip)
     return ip
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='A convenience wrapperaround nsupdate(1).')
+        description='A convenience wrapper for nsupdate(1) in local-host mode.')
+
     parser.add_argument('--noop', action='store_true', 
         help='print out nsupdate command list and exit')
     parser.add_argument('--key', metavar='PATH', required=True,
-        help='TSIG key file for nsupdate')
-    parser.add_argument('--server', metavar='ADDRESS',
-        help='DSN server address (default: use local-host mode)')
-    parser.add_argument('--ttl', metavar='SECONDS', type=int, default=3600, 
-        help='time to live (default: 3600)')
+        help='TSIG key file to pass to nsupdate')
     parser.add_argument('--name', metavar='FQDN', required=True, type=validate_fqdn,
         help='resource record name')
+    parser.add_argument('--ttl', metavar='SECONDS', type=int, default=3600, 
+        help='time to live (default: 3600)')
 
     group = parser.add_argument_group('actions')
     mxgroup = group.add_mutually_exclusive_group()
@@ -180,11 +142,8 @@ def main():
         help='create CNAME mapping FQDN to FQDN-2')
     mxgroup.add_argument('--purge', action='store_true',
         help='delete A, PTR or CNAME records of FQDN')
-
+    
     args = parser.parse_args()
-
-    if not args.name.endswith('.'):
-        args.name += '.'
 
     if args.add_addr:
         nsupdate_scripts = nsupdate_add_addr(args.name, args.add_addr, args.ttl)
@@ -195,18 +154,19 @@ def main():
     elif args.purge:
         nsupdate_scripts = nsupdate_purge_fqdn(args.name)
 
-    nsupdate_cmd = ['nsupdate', '-k', args.key]
-    if args.server:
-        for i in range(len(nsupdate_scripts)):
-            nsupdate_scripts[i] = f'server {args.server}\n' + nsupdate_scripts[i]
-    else:
-        nsupdate_cmd.append('-l')
+    nsupdate_cmd = ['nsupdate', '-l', '-k', args.key]
+    print('nsupdate command:', ' '.join(nsupdate_cmd))
 
-    print('Commands sent to nsupdate:')
+    print('nsupdate input:')
     for script in nsupdate_scripts:
-        print(script)
+        print('\033[1m' + script, end='\033[0m\n')
         if not args.noop:
-            subprocess.run(nsupdate_cmd, input=bytes(script, encoding='ascii'), check=True)
+            try:
+                subprocess.run(nsupdate_cmd, 
+                               input=bytes(script, encoding='ascii'), check=True)
+            except subprocess.CalledProcessError as e:
+                print('nsupdate failed with return code', e.returncode)
+                sys.exit(e.returncode)
 
 
 if __name__ == '__main__':
