@@ -159,7 +159,7 @@ def main():
 
     print('nsupdate input:')
     for script in nsupdate_scripts:
-        print('\033[1m' + script, end='\033[0m\n')
+        print('\033[7m' + script, end='\033[0m\n')
         if not args.noop:
             try:
                 subprocess.run(nsupdate_cmd, 
