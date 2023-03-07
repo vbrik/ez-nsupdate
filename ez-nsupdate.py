@@ -52,31 +52,25 @@ def nsupdate_add_round_robin(fqdn, addrs, ttl):
 
 def nsupdate_purge_fqdn(fqdn):
     """
-    Generate nsupdate script that deletes A, PTR, or CNAME records of fqdn.
-    """
-    cmd = [f'update delete {fqdn}' + '\n' + 'send']
-    ips = get_ipv4_by_hostname(fqdn)
-    # Only delete PTR records if fqdn resolves to a single address. If fqdn
-    # is a round-robin we don't want to delete PTRs.
-    if len(ips) == 1:
-        addr = ips[0]
-        rev_addr = '.'.join(reversed(addr.split('.')))
-        cmd += [f'update delete {rev_addr}.in-addr.arpa.' + '\n' + 'send']
-    return cmd
-
-
-def get_ipv4_by_hostname(hostname):
-    """
-    Resolve ip address(es) of hostname.
+    Generate nsupdate script that deletes A, PTR, or CNAME records of fqdn,
+    depending on what kind of record fqdn is.
     """
     import socket
-    try:
-        # https://docs.python.org/3/library/socket.html#socket.getaddrinfo
-        return list(i[4][0] for i in socket.getaddrinfo(hostname, 0)
-                                if i[0] is socket.AddressFamily.AF_INET
-                                    and i[1] is socket.SocketKind.SOCK_RAW)
-    except socket.gaierror:
-        return list()
+    hostname, aliases, addrs = socket.gethostbyname_ex(fqdn)
+
+    if aliases:
+        # This FQDN is an alias. Just delete it.
+        return [f'update delete {fqdn} CNAME' + '\n' + 'send']
+    elif len(addrs) > 1:
+        # This FQDN is an A record round-robin. Delete all.
+        return [f'update delete {fqdn} A' + '\n' + 'send']
+    elif len(addrs) == 1:
+        # This FQDN is a unique A record. Delete it and the PTR pointing to this FQDN.
+        rev_addr = '.'.join(reversed(addrs[0].split('.')))
+        return [f'update delete {fqdn} A' + '\n' + 'send',
+                f'prereq yxdomain {rev_addr}.in-addr.arpa.' + '\n'
+                    + f'update delete {rev_addr}.in-addr.arpa. PTR {fqdn}'
+                    + '\n' + 'send']
 
 
 def validate_fqdn(hostname):
@@ -102,27 +96,30 @@ def validate_fqdn(hostname):
         raise ValueError
 
 
-def validate_ip(ip):
+def validate_ip(ipaddr):
     """
-    Check that ip is a valid IP address
+    Check that ipaddr is a valid IP address
 
     Args:
-        ip (str): ip to validate
+        ipaddr (str): IP to validate
     Returns:
-        str: IP if it is valid
+        str: unchanged ipaddr if IP is a valid IP address
     Raises:
-        ValueError: if IP is not valid
+        ValueError: if ipaddr is not a valid IP address
     """
     import ipaddress
     # if ip is invalid ValueError will be raised, which is what we want for argparse
-    ipaddress.ip_address(ip)
-    return ip
+    ipaddress.ip_address(ipaddr)
+    return ipaddr
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='A convenience wrapper for nsupdate(1) in local-host mode.')
-
+        description='A convenience wrapper for nsupdate(1) in local-host mode.',
+        epilog='Notes: (1) --purge on a unique (non-round-robin) A record will '
+        'also delete the corresponding PTR record if that PTR points back to '
+        'the FQDN being purged. '
+        '(2) this script cannot delete broken CNAMEs.')
     parser.add_argument('--noop', action='store_true', 
         help='print out nsupdate command list and exit')
     parser.add_argument('--key', metavar='PATH', required=True,
@@ -138,10 +135,10 @@ def main():
         help='create A and PTR records for FQDN')
     mxgroup.add_argument('--add-rr', metavar='IP', nargs='+', type=validate_ip,
         help='create A record round-robin for FQDN')
-    mxgroup.add_argument('--add-alias', metavar='FQDN-2', type=validate_fqdn,
-        help='create CNAME mapping FQDN to FQDN-2')
+    mxgroup.add_argument('--add-alias', metavar='TGT-FQDN', type=validate_fqdn,
+        help='create CNAME mapping FQDN to TGT-FQDN')
     mxgroup.add_argument('--purge', action='store_true',
-        help='delete A, PTR or CNAME records of FQDN')
+        help='delete CNAME, or A and possibly PTR records of FQDN (see notes)')
     
     args = parser.parse_args()
 
@@ -165,7 +162,7 @@ def main():
                 subprocess.run(nsupdate_cmd, 
                                input=bytes(script, encoding='ascii'), check=True)
             except subprocess.CalledProcessError as e:
-                print('nsupdate failed with return code', e.returncode)
+                print('Error: nsupdate failed with return code', e.returncode)
                 sys.exit(e.returncode)
 
 
