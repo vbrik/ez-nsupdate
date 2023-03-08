@@ -75,9 +75,15 @@ def nsupdate_purge_fqdn(fqdn):
     elif len(addrs) == 1:
         # This FQDN is a unique A record. Delete it and the PTR pointing to this FQDN.
         cmd = [f'update delete {fqdn} A' + '\n' + 'send']
-        if socket.gethostbyaddr(addrs[0])[0] + '.' == fqdn:
-            rev_addr = '.'.join(reversed(addrs[0].split('.')))
-            cmd += [f'update delete {rev_addr}.in-addr.arpa. PTR {fqdn}' + '\n' + 'send']
+        try:
+            if socket.gethostbyaddr(addrs[0])[0] + '.' == fqdn:
+                rev_addr = '.'.join(reversed(addrs[0].split('.')))
+                cmd += [f'update delete {rev_addr}.in-addr.arpa. PTR {fqdn}' + '\n' + 'send']
+        except socket.herror as e:
+            if e.errno == 1: # Unknown host
+                pass
+            else:
+                raise
         return cmd
 
 
@@ -131,9 +137,6 @@ def main():
         help='print out nsupdate command list and exit')
     parser.add_argument('--ttl', metavar='SECONDS', type=int, default=3600, 
         help='time to live (default: 3600)')
-    parser.add_argument('--key', metavar='PATH', 
-        default='/var/named/chroot/etc/tsig-keys/dns-3-nsupdate.key',
-        help='TSIG key file to pass to nsupdate (default: /var/named/chroot/etc/tsig-keys/dns-3-nsupdate.key)')
     parser.add_argument('--name', metavar='FQDN', required=True, type=validate_fqdn,
         help='resource record name')
 
@@ -159,16 +162,12 @@ def main():
     elif args.purge:
         nsupdate_scripts = nsupdate_purge_fqdn(args.name)
 
-    nsupdate_cmd = ['nsupdate', '-l', '-k', args.key]
-    print('nsupdate command:')
-    print('\033[7m' + ' '.join(nsupdate_cmd) + '\033[0m')
-
     print('nsupdate input:')
     for script in nsupdate_scripts:
         print('\033[7m' + script, end='\033[0m\n')
         if not args.noop:
             try:
-                subprocess.run(nsupdate_cmd, 
+                subprocess.run(['nsupdate', '-l'], 
                                input=bytes(script, encoding='ascii'), check=True)
             except subprocess.CalledProcessError as e:
                 print('Error: nsupdate failed with return code', e.returncode)
