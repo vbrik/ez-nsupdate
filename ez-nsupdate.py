@@ -56,7 +56,15 @@ def nsupdate_purge_fqdn(fqdn):
     depending on what kind of record fqdn is.
     """
     import socket
-    hostname, aliases, addrs = socket.gethostbyname_ex(fqdn)
+    try:
+        hostname, aliases, addrs = socket.gethostbyname_ex(fqdn)
+    except socket.gaierror as e:
+        if e.errno == -2: # Name or service not known
+            # This could be caused by a broken CNAME, so try to delete it
+            return [f'prereq yxrrset {fqdn} CNAME' + '\n'
+                    + f'update delete {fqdn} CNAME' + '\n' + 'send']
+        else:
+            raise
 
     if aliases:
         # This FQDN is an alias. Just delete it.
@@ -66,11 +74,11 @@ def nsupdate_purge_fqdn(fqdn):
         return [f'update delete {fqdn} A' + '\n' + 'send']
     elif len(addrs) == 1:
         # This FQDN is a unique A record. Delete it and the PTR pointing to this FQDN.
-        rev_addr = '.'.join(reversed(addrs[0].split('.')))
-        return [f'update delete {fqdn} A' + '\n' + 'send',
-                f'prereq yxdomain {rev_addr}.in-addr.arpa.' + '\n'
-                    + f'update delete {rev_addr}.in-addr.arpa. PTR {fqdn}'
-                    + '\n' + 'send']
+        cmd = [f'update delete {fqdn} A' + '\n' + 'send']
+        if socket.gethostbyaddr(addrs[0])[0] + '.' == fqdn:
+            rev_addr = '.'.join(reversed(addrs[0].split('.')))
+            cmd += [f'update delete {rev_addr}.in-addr.arpa. PTR {fqdn}' + '\n' + 'send']
+        return cmd
 
 
 def validate_fqdn(hostname):
@@ -118,19 +126,19 @@ def main():
         description='A convenience wrapper for nsupdate(1) in local-host mode.',
         epilog='Notes: (1) --purge on a unique (non-round-robin) A record will '
         'also delete the corresponding PTR record if that PTR points back to '
-        'the FQDN being purged. '
-        '(2) this script cannot delete broken CNAMEs.')
+        'the FQDN being purged.')
     parser.add_argument('--noop', action='store_true', 
         help='print out nsupdate command list and exit')
-    parser.add_argument('--key', metavar='PATH', required=True,
-        help='TSIG key file to pass to nsupdate')
-    parser.add_argument('--name', metavar='FQDN', required=True, type=validate_fqdn,
-        help='resource record name')
     parser.add_argument('--ttl', metavar='SECONDS', type=int, default=3600, 
         help='time to live (default: 3600)')
+    parser.add_argument('--key', metavar='PATH', 
+        default='/var/named/chroot/etc/tsig-keys/dns-3-nsupdate.key',
+        help='TSIG key file to pass to nsupdate (default: /var/named/chroot/etc/tsig-keys/dns-3-nsupdate.key)')
+    parser.add_argument('--name', metavar='FQDN', required=True, type=validate_fqdn,
+        help='resource record name')
 
-    group = parser.add_argument_group('actions')
-    mxgroup = group.add_mutually_exclusive_group()
+    actions_group = parser.add_argument_group('action arguments')
+    mxgroup = actions_group.add_mutually_exclusive_group()
     mxgroup.add_argument('--add-addr', metavar='IP',
         help='create A and PTR records for FQDN')
     mxgroup.add_argument('--add-rr', metavar='IP', nargs='+', type=validate_ip,
@@ -152,7 +160,8 @@ def main():
         nsupdate_scripts = nsupdate_purge_fqdn(args.name)
 
     nsupdate_cmd = ['nsupdate', '-l', '-k', args.key]
-    print('nsupdate command:', ' '.join(nsupdate_cmd))
+    print('nsupdate command:')
+    print('\033[7m' + ' '.join(nsupdate_cmd) + '\033[0m')
 
     print('nsupdate input:')
     for script in nsupdate_scripts:
